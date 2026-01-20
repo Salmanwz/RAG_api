@@ -89,8 +89,6 @@ curl -X POST http://localhost:8000/ask \
 | `/health` | GET | Health check and status |
 | `/ask` | POST | Ask a security question |
 | `/load-mitre` | POST | Load MITRE ATT&CK data |
-| `/stats` | GET | Get knowledge base statistics |
-| `/docs` | GET | Interactive API documentation |
 
 ### Interactive Documentation
 
@@ -110,11 +108,6 @@ curl -X POST http://localhost:8000/ask \
 curl -X POST http://localhost:8000/ask \
   -H "Content-Type: application/json" \
   -d '{"question": "How to detect PowerShell abuse?"}'
-```
-
-**Check statistics:**
-```bash
-curl http://localhost:8000/stats
 ```
 
 ## 🔧 Integration Examples
