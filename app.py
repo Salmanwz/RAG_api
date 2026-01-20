@@ -1,8 +1,8 @@
-import os
-import logging
-from fastapi import FastAPI
-import chromadb
-import ollama
+import os, requests, logging, json
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from mitreattack.stix20 import MitreAttackData
+import chromadb, ollama
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,67 +12,86 @@ logging.basicConfig(
 MODEL_NAME = os.getenv("MODEL_NAME", "tinyllama")
 logging.info(f"Using model: {MODEL_NAME}")
 
+app = FastAPI(title="Security RAG API", version="1.0.0")
+chroma = chromadb.PersistentClient(path="./db")
+collection = chroma.get_or_create_collection("security_kb")
 
-app = FastAPI()    # Initialize FastAPI app
-chroma = chromadb.PersistentClient(path="./db")  # Initialize ChromaDB client 
-collection = chroma.get_or_create_collection("docs") # Get or create collection
 
-@app.get('/health')
-def health_check():
-    """Health check endpoint to verify the service is running.
+# Health check endpoint
+@app.get("/health")
+def health():
+    return {"status": "ok", "docs": collection.count()}
 
-    Returns:
-        dict: A simple status message.
-    """
-    return {"status": "ok"}
 
-@app.post("/query") 
-def query(q: str):
-    """Creates an endpoint to handle queries.
+# Endpoint to handle queries
+@app.post("/ask")
+def ask(q: str):
+    """Query Endpoint.
 
     Args:
-        q (str): User query string.
+        q (str): Question text
 
     Returns:
-        json: Generated answer from the model.
-    """
-    results = collection.query(query_texts=[q], n_results=1)
-    context = results["documents"][0][0] if results["documents"] else ""
-    logging.info(f"/query asked: {q}")
-    answer = ollama.generate(
-        model=MODEL_NAME,
-        prompt=f"Context:\n{context}\n\nQuestion: {q}\n\nAnswer clearly and concisely:"
-    )
-    
-    return {answer["response"]}
-
-@app.post("/add")
-def add_knowledge(text: str):
-    """ Add Context to Knowledge Base
-
-    Args:
-        text (str): Text content to be added to the knowledge base.
-
-    Returns:
-        _type_: Response indicating success or failure.
+        _type_: Response with answer
     """
     try:
-        # Generate a unique ID for this document
-        import uuid
-        doc_id = str(uuid.uuid4())
+        # Find relevant context
+        results = collection.query(query_texts=[q], n_results=3)
+        context = "\n\n".join(results["documents"][0] if results["documents"] else [])
         
-        # Add the text to Chroma collection
-        collection.add(documents=[text], ids=[doc_id])
-        logging.info(f"/add received new text {doc_id} generated)")
-        
-        return {
-            "status": "success",
-            "message": "Content added to knowledge base",
-            "id": doc_id
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        # Generate response with enhanced prompt
+        prompt = f"""You are a cybersecurity expert assistant. Use the following context to answer the question.
 
+                    Context:{context}
+
+                    Question: {q}
+
+                    Provide a clear, actionable answer. If the context mentions MITRE ATT&CK techniques, include the technique IDs. If discussing detection, mention specific tools or data sources.
+
+        Answer:"""
+            
+        answer = ollama.generate(
+                model=MODEL_NAME,
+                prompt=prompt
+            )
+            
+        return {
+                "question": q,
+                "answer": answer["response"],
+
+            }
+    
+    except Exception as e:
+
+        logging.error(f"Query error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint to load MITRE ATT&CK data
+@app.post("/load-mitre")
+def load_mitre():
+    """ Endpoint to Load Mitre Data
+
+    """
+    # Download latest data
+    url = "https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json"
+    r = requests.get(url)
+    with open("./tmp/attack.json", "wb") as f:
+        f.write(r.content)
+    
+    # Load with MITRE library (handles all the parsing)
+    data = MitreAttackData("./tmp/attack.json")
+    
+    docs = []
+    ids = []
+    
+    # Just get techniques - simple!
+    for tech in data.get_techniques(remove_revoked_deprecated=True):
+        text = f"{tech.name} ({tech.id})\n{tech.description}"
+        docs.append(text)
+        ids.append(tech.id)
+    
+    # Embed everything at once
+    collection.add(documents=docs, ids=ids)
+    
+    return {"loaded": len(docs)}
